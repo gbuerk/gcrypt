@@ -1,0 +1,19 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Keep encrypted configuration in Git, never its plaintext counterpart.
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env*.enc
+
+# Local tooling and package artifacts.
+.npmrc
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.tgz
+.DS_Store
