@@ -124,7 +124,7 @@ describe('recipient commands', () => {
         const file = join(home, '.env.enc')
         await writeFile(file, (await signedDotenv(owner.recipient, signing)).replace(/(ed25519:[A-Za-z0-9_-]+):[A-Za-z0-9_-]+/u, '$1:invalid'))
 
-        await expect(grantRecipient(file, { homeDirectory: home, prompt: { memberId: async () => 'duplicate', memberSetupCode: async () => encodeMemberSetupCode({ recipient: owner.recipient, signingKey: generateSigningIdentity().publicKey }) } })).rejects.toThrow('tampered with and is no longer valid')
+        await expect(grantRecipient(file, { homeDirectory: home, prompt: { memberId: async () => 'duplicate', memberSetupCode: async () => encodeMemberSetupCode({ recipient: owner.recipient, signingKey: generateSigningIdentity().publicKey }) } })).rejects.toThrow(`${file} has been tampered with and is no longer valid`)
     })
 
     it('rejects recipient changes by a decrypt-only user', async () => {

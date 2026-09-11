@@ -257,20 +257,20 @@ async function loadVerifiedDocument(filePath: string): Promise<{ source: string,
     try {
         loaded = await loadDocument(filePath)
     } catch (error) {
-        if (error instanceof DocumentValidationError) throw tamperedDocumentError()
+        if (error instanceof DocumentValidationError) throw tamperedDocumentError(filePath)
         throw error
     }
     try {
         validateMaintainers(loaded.document)
-        if (!hasValidSignature(loaded.document)) throw tamperedDocumentError()
+        if (!hasValidSignature(loaded.document)) throw tamperedDocumentError(filePath)
         return loaded
     } catch {
-        throw tamperedDocumentError()
+        throw tamperedDocumentError(filePath)
     }
 }
 
-function tamperedDocumentError(): Error {
-    return new Error('This file has been tampered with and is no longer valid')
+function tamperedDocumentError(filePath: string): Error {
+    return new Error(`${filePath} has been tampered with and is no longer valid`)
 }
 
 async function encryptDotenv(plaintext: string, metadata: DocumentMetadata): Promise<string> {
