@@ -124,7 +124,7 @@ describe('recipient commands', () => {
         const file = join(home, '.env.enc')
         await writeFile(file, (await signedDotenv(owner.recipient, signing)).replace(/(ed25519:[A-Za-z0-9_-]+):[A-Za-z0-9_-]+/u, '$1:invalid'))
 
-        await expect(grantRecipient(file, { homeDirectory: home, prompt: { memberId: async () => 'duplicate', memberSetupCode: async () => encodeMemberSetupCode({ recipient: owner.recipient, signingKey: generateSigningIdentity().publicKey }) } })).rejects.toThrow('valid maintainer signature')
+        await expect(grantRecipient(file, { homeDirectory: home, prompt: { memberId: async () => 'duplicate', memberSetupCode: async () => encodeMemberSetupCode({ recipient: owner.recipient, signingKey: generateSigningIdentity().publicKey }) } })).rejects.toThrow('tampered with and is no longer valid')
     })
 
     it('rejects recipient changes by a decrypt-only user', async () => {
@@ -244,6 +244,24 @@ describe('encrypted document lifecycle', () => {
         await expect(readFile(file, 'utf8')).resolves.toContain('"members": [')
     })
 
+    it('encrypts and decrypts nested JSON settings without leaving scalar plaintext', async () => {
+        const home = await temporaryDirectory()
+        await setup({ homeDirectory: home })
+        await maintainerSetup({ homeDirectory: home })
+        const file = join(home, 'settings.json.enc')
+        const plaintext = '{"cybersource":{"key":"secret","enabled":true},"locations":[{"id":1},null],"empty":{}}'
+
+        await createEncryptedDocument(file, plaintext, { homeDirectory: home })
+
+        const encrypted = await readFile(file, 'utf8')
+        expect(encrypted).not.toContain('"secret"')
+        expect(encrypted).toContain('"version": 3')
+        expect(await decryptEncryptedDocument(file, home)).toBe(`${JSON.stringify(JSON.parse(plaintext), undefined, 2)}\n`)
+        await expect(verifyEncryptedDocument(file)).resolves.toBeUndefined()
+        await writeFile(file, encrypted.replace('"empty": {}', '"empty": {}, "injected": []'))
+        await expect(verifyEncryptedDocument(file)).rejects.toThrow('tampered with and is no longer valid')
+    })
+
     it('refuses decryption after a ciphertext change invalidates the signature', async () => {
         const home = await temporaryDirectory()
         await setup({ homeDirectory: home, prompt: { confirm: async () => true } })
@@ -254,7 +272,7 @@ describe('encrypted document lifecycle', () => {
         const replacement = await encryptValue('changed', document.metadata.recipients)
         await writeFile(file, (await readFile(file, 'utf8')).replace(document.values[0].marker, replacement))
 
-        await expect(verifyEncryptedDocument(file)).rejects.toThrow('valid maintainer signature')
+        await expect(verifyEncryptedDocument(file)).rejects.toThrow('tampered with and is no longer valid')
         await expect(decryptEncryptedDocument(file, home)).rejects.toThrow()
     })
 
@@ -275,7 +293,7 @@ describe('encrypted document lifecycle', () => {
             restore()
         }
 
-        await expect(verifyEncryptedDocument(file)).rejects.toThrow('valid maintainer signature')
+        await expect(verifyEncryptedDocument(file)).rejects.toThrow('tampered with and is no longer valid')
     })
 
     it('edits a verified snapshot without rereading the encrypted document', async () => {
@@ -307,7 +325,19 @@ describe('encrypted document lifecycle', () => {
 
         await writeFile(file, (await readFile(file, 'utf8')).replace('# gcrypt-member: local,', '# gcrypt-member: impersonated,'))
 
-        await expect(verifyEncryptedDocument(file)).rejects.toThrow('valid maintainer signature')
+        await expect(verifyEncryptedDocument(file)).rejects.toThrow('tampered with and is no longer valid')
+    })
+
+    it('reports invalid member metadata as tampering', async () => {
+        const home = await temporaryDirectory()
+        await setup({ homeDirectory: home })
+        await maintainerSetup({ homeDirectory: home })
+        const file = join(home, '.env.dev.enc')
+        await createEncryptedDocument(file, 'TOKEN=secret\n', { homeDirectory: home })
+
+        await writeFile(file, (await readFile(file, 'utf8')).replace(/(# gcrypt-member: local,[^,]+,)[^,]+(,true)/u, '$1ed25519:not-a-key$2'))
+
+        await expect(verifyEncryptedDocument(file)).rejects.toThrow('tampered with and is no longer valid')
     })
 
     it('refuses a document whose signed member role was changed', async () => {
@@ -329,7 +359,7 @@ describe('encrypted document lifecycle', () => {
             .replace(`# gcrypt-maintainers: ${signing.publicKey}`, `# gcrypt-maintainers: ${signing.publicKey},${collaboratorSigning.publicKey}`)
             .replace(`,${collaboratorSigning.publicKey},false`, `,${collaboratorSigning.publicKey},true`))
 
-        await expect(verifyEncryptedDocument(file)).rejects.toThrow('valid maintainer signature')
+        await expect(verifyEncryptedDocument(file)).rejects.toThrow('tampered with and is no longer valid')
     })
 
 })

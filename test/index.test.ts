@@ -70,4 +70,31 @@ describe('gcrypt package', () => {
             { id: 'test-maintainer', recipient: expect.stringMatching(/^age1/u), signingKey: expect.stringMatching(/^ed25519:/u), isMaintainer: true },
         ])
     })
+
+    it('initializes an empty version-3 JSON document', async () => {
+        const project = await temporaryDirectory()
+        const home = await temporaryDirectory()
+        const packageRoot = process.cwd()
+        let standardError = ''
+        let standardOutput = ''
+        const status = await new Promise<number | null>((resolve, reject) => {
+            const child = spawn(process.execPath, ['--import', join(packageRoot, 'node_modules', 'tsx', 'dist', 'loader.mjs'), join(packageRoot, 'src', 'index.ts'), 'secrets', 'init', 'settings.json.enc'], {
+                cwd: project,
+                env: { ...process.env, HOME: home },
+                stdio: ['pipe', 'pipe', 'pipe'],
+            })
+            child.once('error', reject)
+            child.once('exit', resolve)
+            child.stderr.on('data', (chunk: Buffer) => { standardError += chunk.toString() })
+            child.stdout.on('data', (chunk: Buffer) => {
+                standardOutput += chunk.toString()
+                if (standardOutput.includes('Initial maintainer ID:')) child.stdin.end('test-maintainer\n')
+            })
+        })
+
+        expect(status, standardError).toBe(0)
+        const document = parseEncryptedDocument(await readFile(join(project, 'settings.json.enc'), 'utf8'), 'json')
+        expect(document.metadata.version).toBe(3)
+        expect(document.values).toEqual([])
+    })
 })

@@ -56,10 +56,24 @@ describe('encrypted JSON documents', () => {
         const document = parseJsonDocument(source)
         const replacement = marker()
         expect(renderEncryptedDocument(document, [replacement, replacement])).toContain(`"token" : "${replacement}"`)
-        expect(document.values.map(({ jsonType }) => jsonType)).toEqual(['string', 'string'])
+        expect(document.values.map(({ key, jsonType }) => ({ key, jsonType }))).toEqual([{ key: '/token', jsonType: 'string' }, { key: '/port', jsonType: 'string' }])
         expect(() => parseJsonDocument(source.replace(', "members": ' + JSON.stringify(members), ''))).toThrow('members metadata')
         expect(() => parseJsonDocument(source.replace(',"isMaintainer":false', ''))).toThrow('maintainer role')
         expect(() => parseJsonDocument(source.replace('"recipients": ' + JSON.stringify(recipients), '"recipients": []'))).toThrow('recipients metadata')
+    })
+
+    it('parses encrypted scalar leaves in nested objects and arrays', async () => {
+        const { marker, members, recipients, signer } = await fixture()
+        const source = `{"$gcrypt":{"version":3,"members":${JSON.stringify(members)},"recipients":${JSON.stringify(recipients)},"maintainers":["${signer.publicKey}"],"signatures":["${signer.publicKey}:signature"]},"service":{"token":"${marker()}","ports":["${marker()}",{"enabled":"${marker()}"}]},"empty":{}}`
+
+        const document = parseJsonDocument(source)
+
+        expect(document.values.map(({ key }) => key)).toEqual(['/service/token', '/service/ports/0', '/service/ports/1/enabled'])
+        expect(document.jsonStructure).toEqual(expect.arrayContaining([
+            { key: '/service', type: 'object' },
+            { key: '/service/ports', type: 'array' },
+            { key: '/empty', type: 'object' },
+        ]))
     })
 })
 

@@ -1,59 +1,59 @@
 {
-    "name": "@gbuerk/gcrypt",
-    "version": "0.1.0",
-    "description": "Git-friendly encrypted dotenv and JSON configuration",
-    "type": "module",
-    "keywords": [
-        "secrets",
-        "encryption",
-        "dotenv",
-        "configuration",
-        "age",
-        "git"
-    ],
-    "license": "MIT",
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/gbuerk/gcrypt.git"
-    },
-    "homepage": "https://github.com/gbuerk/gcrypt#readme",
-    "bugs": {
-        "url": "https://github.com/gbuerk/gcrypt/issues"
-    },
-    "publishConfig": {
-        "access": "public"
-    },
-    "bin": {
-        "gcrypt": "dist/index.js"
-    },
-    "files": [
-        "dist"
-    ],
-    "engines": {
-        "node": "^22.13.0 || >=23.5.0"
-    },
-    "scripts": {
-        "build": "tsc -p tsconfig.json",
-        "dev": "tsx src/index.ts",
-        "lint": "eslint .",
-        "test": "vitest run",
-        "test:watch": "vitest",
-        "prepack": "npm run build",
-        "prepublishOnly": "npm run lint && npm test"
-    },
-    "dependencies": {
-        "age-encryption": "^0.3.1",
-        "commander": "^15.0.0",
-        "dotenv": "^17.2.3",
-        "inquirer": "^14.0.2"
-    },
-    "devDependencies": {
-        "@types/node": "^25.9.3",
-        "@typescript-eslint/eslint-plugin": "^8.59.0",
-        "@typescript-eslint/parser": "^8.59.0",
-        "eslint": "^9.39.4",
-        "tsx": "^4.21.0",
-        "typescript": "^6.0.3",
-        "vitest": "^4.1.0"
-    }
+  "name": "@gbuerk/gcrypt",
+  "version": "1.0.1",
+  "description": "Git-friendly encrypted dotenv and JSON configuration",
+  "type": "module",
+  "keywords": [
+    "secrets",
+    "encryption",
+    "dotenv",
+    "configuration",
+    "age",
+    "git"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gbuerk/gcrypt.git"
+  },
+  "homepage": "https://github.com/gbuerk/gcrypt#readme",
+  "bugs": {
+    "url": "https://github.com/gbuerk/gcrypt/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "gcrypt": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": "^22.13.0 || >=23.5.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run lint && npm test"
+  },
+  "dependencies": {
+    "age-encryption": "^0.3.1",
+    "commander": "^15.0.0",
+    "dotenv": "^17.2.3",
+    "inquirer": "^14.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "@typescript-eslint/eslint-plugin": "^8.59.0",
+    "@typescript-eslint/parser": "^8.59.0",
+    "eslint": "^9.39.4",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.0"
+  }
 }

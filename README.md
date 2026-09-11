@@ -119,8 +119,9 @@ Create a JSON configuration file by using a `.json.enc` name:
 npx gcrypt secrets init config.json.enc
 ```
 
-JSON documents support top-level scalar values: strings, numbers, booleans,
-and `null`. Nested objects and arrays are not supported.
+JSON documents support nested objects and arrays. Every scalar leaf (strings,
+numbers, booleans, and `null`) is encrypted independently. The complete JSON
+shape, including empty objects and arrays, is included in the signature.
 
 ## Commands
 

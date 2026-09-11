@@ -19,6 +19,7 @@ import {
     type DocumentFormat,
     type DocumentMember,
     type DocumentMetadata,
+    DocumentValidationError,
     type ParsedDocument,
     parseEncryptedDocument,
     renderEncryptedDocument,
@@ -175,7 +176,9 @@ export async function decryptEncryptedDocument(filePath: string, homeDirectory?:
 async function decryptParsedDocument(document: ParsedDocument, identity: string): Promise<string> {
     const values = await Promise.all(document.values.map(({ marker }) => decryptValue(marker, identity)))
     if (document.format === 'dotenv') return document.values.map(({ key }, index) => `${key}=${values[index]}`).join('\n') + (values.length ? '\n' : '')
-    const decrypted = Object.fromEntries(document.values.map(({ key }, index) => [key, parseJsonScalar(values[index])]))
+    const decrypted = JSON.parse(document.source) as Record<string, unknown>
+    delete decrypted.$gcrypt
+    for (const [index, value] of document.values.entries()) setJsonPath(decrypted, value.key, parseJsonScalar(values[index]))
     return `${JSON.stringify(decrypted, undefined, 2)}\n`
 }
 
@@ -220,7 +223,7 @@ export async function executeDotenv(filePath: string, command: string[], homeDir
 
 async function changeMembers(filePath: string, options: CommandOptions, update: (members: DocumentMember[]) => DocumentMember[]): Promise<void> {
     const { source, document, format, identity, privateKey, publicKey } = await loadAuthorizedDocument(filePath, options.homeDirectory)
-    const metadata = metadataForMembers(update(document.metadata.members))
+    const metadata = metadataForMembers(update(document.metadata.members), document.metadata.version)
     const plaintextValues = await Promise.all(document.values.map(({ marker }) => decryptValue(marker, identity)))
     const markers = await Promise.all(plaintextValues.map((value) => encryptValue(value, metadata.recipients)))
     await writeSignedDocument(filePath, source, document, format, { ...metadata, signatures: document.metadata.signatures }, markers, privateKey, publicKey)
@@ -250,10 +253,24 @@ async function loadDocument(filePath: string): Promise<{ source: string, documen
 }
 
 async function loadVerifiedDocument(filePath: string): Promise<{ source: string, document: ParsedDocument, format: DocumentFormat }> {
-    const loaded = await loadDocument(filePath)
-    validateMaintainers(loaded.document)
-    if (!hasValidSignature(loaded.document)) throw new Error('Document does not have a valid maintainer signature')
-    return loaded
+    let loaded: { source: string, document: ParsedDocument, format: DocumentFormat }
+    try {
+        loaded = await loadDocument(filePath)
+    } catch (error) {
+        if (error instanceof DocumentValidationError) throw tamperedDocumentError()
+        throw error
+    }
+    try {
+        validateMaintainers(loaded.document)
+        if (!hasValidSignature(loaded.document)) throw tamperedDocumentError()
+        return loaded
+    } catch {
+        throw tamperedDocumentError()
+    }
+}
+
+function tamperedDocumentError(): Error {
+    return new Error('This file has been tampered with and is no longer valid')
 }
 
 async function encryptDotenv(plaintext: string, metadata: DocumentMetadata): Promise<string> {
@@ -266,12 +283,16 @@ async function encryptJson(plaintext: string, metadata: DocumentMetadata): Promi
     let values: unknown
     try { values = JSON.parse(plaintext) } catch { throw new Error('Invalid JSON document') }
     if (typeof values !== 'object' || values === null || Array.isArray(values) || Object.hasOwn(values, '$gcrypt')) throw new Error('JSON document must be a top-level object without $gcrypt')
-    const encrypted: Record<string, unknown> = { $gcrypt: { warning: managedFileWarning, ...metadata, signatures: ['pending'] } }
-    for (const [key, value] of Object.entries(values)) {
-        if (value !== null && typeof value === 'object') throw new Error(`JSON value ${key} must be a scalar`)
-        encrypted[key] = await encryptValue(JSON.stringify(value), metadata.recipients)
-    }
+    const jsonMetadata = { ...metadata, version: 3 as const }
+    const encrypted: Record<string, unknown> = { $gcrypt: { warning: managedFileWarning, ...jsonMetadata, signatures: ['pending'] } }
+    for (const [key, value] of Object.entries(values)) encrypted[key] = await encryptJsonValue(value, jsonMetadata)
     return `${JSON.stringify(encrypted, undefined, 2)}\n`
+}
+
+async function encryptJsonValue(value: unknown, metadata: DocumentMetadata): Promise<unknown> {
+    if (Array.isArray(value)) return Promise.all(value.map((entry) => encryptJsonValue(entry, metadata)))
+    if (value !== null && typeof value === 'object') return Object.fromEntries(await Promise.all(Object.entries(value).map(async ([key, entry]) => [key, await encryptJsonValue(entry, metadata)])))
+    return encryptValue(JSON.stringify(value), metadata.recipients)
 }
 
 function parseJsonScalar(value: string): string | number | boolean | null {
@@ -280,6 +301,20 @@ function parseJsonScalar(value: string): string | number | boolean | null {
         if (parsed === null || ['string', 'number', 'boolean'].includes(typeof parsed)) return parsed as string | number | boolean | null
     } catch { /* Older documents encrypted string values directly. */ }
     return value
+}
+
+function setJsonPath(root: Record<string, unknown>, path: string, value: string | number | boolean | null): void {
+    const segments = path.slice(1).split('/').map((segment) => segment.replace(/~1/gu, '/').replace(/~0/gu, '~'))
+    const key = segments.pop()
+    if (key === undefined) throw new Error('Invalid JSON value path')
+    let parent: Record<string, unknown> | unknown[] = root
+    for (const segment of segments) {
+        const next = Array.isArray(parent) ? parent[Number(segment)] : parent[segment]
+        if (next === null || typeof next !== 'object') throw new Error('Invalid JSON value path')
+        parent = next as Record<string, unknown> | unknown[]
+    }
+    if (Array.isArray(parent)) parent[Number(key)] = value
+    else parent[key] = value
 }
 
 async function atomicWrite(filePath: string, value: string): Promise<void> {
@@ -354,9 +389,9 @@ function renderMetadata(source: string, format: DocumentFormat, metadata: Docume
     return rendered.startsWith(`# WARNING: ${managedFileWarning}`) ? rendered : `# WARNING: ${managedFileWarning}\n${rendered}`
 }
 
-function metadataForMembers(members: DocumentMember[]): DocumentMetadata {
+function metadataForMembers(members: DocumentMember[], version: DocumentMetadata['version'] = 2): DocumentMetadata {
     return {
-        version: 2,
+        version,
         members,
         recipients: members.map(({ recipient }) => recipient),
         maintainers: members.flatMap(({ signingKey, isMaintainer }) => isMaintainer ? [signingKey] : []),

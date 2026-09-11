@@ -159,7 +159,7 @@ async function initializeProject(file: string | undefined, getPrompt: () => Prom
     const memberId = await initialMemberId(getPrompt())
     const examplePath = '.env.example'
     try { await access(examplePath) } catch { await writeFile(examplePath, '') }
-    await createEncryptedDocument(target, '', {
+    await createEncryptedDocument(target, emptyDocument(target), {
         members: [{ id: memberId, recipient: identities.age.recipient, signingKey: identities.signing.publicKey, isMaintainer: true }],
     })
     stdout.write(`Created ${target}. Run npm run secrets to add values.\n`)
@@ -191,7 +191,7 @@ export function createProgram(providedPrompt?: Prompt): Command {
         return prompt
     }
     const program = new Command()
-    program.name('gcrypt').description('Safely share app settings with your team').version('0.1.0').exitOverride()
+    program.name('gcrypt').description('Safely share app settings with your team').version('0.1.3').exitOverride()
     program.hook('postAction', () => { prompt?.close() })
     program.command('setup').description('Set up your local access and signing keys').action(async () => { await runSetup() })
     const maintainer = program.command('maintainer').description('Manage who can approve changes')
@@ -240,12 +240,16 @@ export function createProgram(providedPrompt?: Prompt): Command {
         const target = file ?? '.env.dev.enc'
         try { await access(target); throw new Error(`Refusing to overwrite existing encrypted file: ${target}`) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
         const identities = await runSetup()
-        await createEncryptedDocument(target, '', {
+        await createEncryptedDocument(target, emptyDocument(target), {
             members: [{ id: await initialMemberId(getPrompt()), recipient: identities.age.recipient, signingKey: identities.signing.publicKey, isMaintainer: true }],
         })
         stdout.write(`Created ${target}. Run npm run secrets to add values.\n`)
     })
     return program
+}
+
+function emptyDocument(filePath: string): string {
+    return filePath.endsWith('.json.enc') || filePath.endsWith('.json') ? '{}' : ''
 }
 
 async function main(): Promise<void> {

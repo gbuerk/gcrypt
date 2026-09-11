@@ -1,8 +1,9 @@
 export type DocumentFormat = 'dotenv' | 'json'
 export type JsonScalarType = 'string' | 'number' | 'boolean' | 'null'
+export type JsonValueType = JsonScalarType | 'object' | 'array'
 
 export interface DocumentMetadata {
-    version: 2
+    version: 2 | 3
     members: DocumentMember[]
     recipients: string[]
     maintainers: string[]
@@ -22,10 +23,16 @@ export interface EncryptedValue {
     jsonType?: JsonScalarType
 }
 
+export interface JsonStructureValue {
+    key: string
+    type: JsonValueType
+}
+
 export interface EncryptedDocument {
     format: DocumentFormat
     metadata: DocumentMetadata
     values: EncryptedValue[]
+    jsonStructure?: JsonStructureValue[]
 }
 
 interface SourceValue extends EncryptedValue {
@@ -66,8 +73,8 @@ export function parseDotenvDocument(source: string): ParsedDocument {
             const [, name, value] = metadataMatch
             if (name === undefined) {
                 if (metadata.version !== undefined) throw new DocumentValidationError('Duplicate gcrypt version metadata')
-                if (value !== '2') throw new DocumentValidationError('Unsupported gcrypt version')
-                metadata.version = 2
+                if (value !== '2' && value !== '3') throw new DocumentValidationError('Unsupported gcrypt version')
+                metadata.version = Number(value) as 2 | 3
             } else if (name === 'signature') {
                 metadata.signatures!.push(value)
             } else if (name === 'member') {
@@ -110,18 +117,21 @@ export function parseJsonDocument(source: string): ParsedDocument {
 
     const metadata = parseJsonMetadata(document.$gcrypt)
     const values: SourceValue[] = []
+    const jsonStructure: JsonStructureValue[] = []
     const scanner = new JsonObjectScanner(source)
-    for (const property of scanner.properties()) {
-        if (property.key === '$gcrypt') continue
+    for (const property of scanner.values()) {
+        if (property.key === '/$gcrypt' || property.key.startsWith('/$gcrypt/')) continue
+        jsonStructure.push({ key: property.key, type: property.type })
         if (property.type === 'object' || property.type === 'array') {
-            throw new DocumentValidationError(`JSON value ${property.key} must be a scalar`)
+            if (metadata.version === 2) throw new DocumentValidationError(`JSON value ${property.key} must be a scalar in version 2 documents`)
+            continue
         }
         if (property.type !== 'string' || !isEncryptedMarker(property.value)) {
             throw new DocumentValidationError(`JSON value ${property.key} is not an encrypted marker`)
         }
         values.push({ key: property.key, marker: property.value, jsonType: property.type, start: property.start, end: property.end })
     }
-    return { format: 'json', source, metadata, values, sourceValues: values }
+    return { format: 'json', source, metadata, values, sourceValues: values, jsonStructure }
 }
 
 export function renderEncryptedDocument(document: ParsedDocument, markers: readonly string[]): string {
@@ -145,6 +155,7 @@ export function canonicalSigningData(document: EncryptedDocument): string {
         recipients: document.metadata.recipients,
         maintainers: document.metadata.maintainers,
         values: document.values.map(({ key, marker, jsonType }) => ({ key, marker, ...(jsonType ? { jsonType } : {}) })),
+        ...(document.format === 'json' && document.metadata.version >= 3 ? { structure: document.jsonStructure } : {}),
     })
 }
 
@@ -205,7 +216,7 @@ function parseJsonMetadata(value: unknown): DocumentMetadata {
         throw new DocumentValidationError('Invalid $gcrypt warning')
     }
     return validateMetadata({
-        version: value.version === 2 ? 2 : undefined,
+        version: value.version === 2 || value.version === 3 ? value.version : undefined,
         members: Array.isArray(value.members) ? value.members.map(parseJsonMember) : undefined,
         recipients: Array.isArray(value.recipients) ? value.recipients as string[] : undefined,
         maintainers: Array.isArray(value.maintainers) ? value.maintainers as string[] : undefined,
@@ -214,7 +225,7 @@ function parseJsonMetadata(value: unknown): DocumentMetadata {
 }
 
 function validateMetadata(partial: Partial<DocumentMetadata>): DocumentMetadata {
-    if (partial.version !== 2) throw new DocumentValidationError('Missing or unsupported gcrypt version')
+    if (partial.version !== 2 && partial.version !== 3) throw new DocumentValidationError('Missing or unsupported gcrypt version')
     const members = validateMembers(partial.members)
     const recipients = validateStringList(partial.recipients, 'recipients')
     const maintainers = validateStringList(partial.maintainers, 'maintainers')
@@ -223,7 +234,7 @@ function validateMetadata(partial: Partial<DocumentMetadata>): DocumentMetadata 
     const memberMaintainers = members.flatMap(({ signingKey, isMaintainer }) => isMaintainer ? [signingKey] : [])
     if (!sameList(recipients, memberRecipients)) throw new DocumentValidationError('gcrypt recipients metadata does not match members')
     if (!sameList(maintainers, memberMaintainers)) throw new DocumentValidationError('gcrypt maintainers metadata does not match members')
-    return { version: 2, members, recipients, maintainers, signatures }
+    return { version: partial.version, members, recipients, maintainers, signatures }
 }
 
 function validateMembers(members: DocumentMember[] | undefined): DocumentMember[] {
@@ -356,57 +367,69 @@ class JsonObjectScanner {
 
     constructor(private readonly source: string) {}
 
-    *properties(): Generator<{ key: string, value: string, type: JsonScalarType | 'object' | 'array', start: number, end: number }> {
+    *values(): Generator<{ key: string, value: string, type: JsonValueType, start: number, end: number }> {
         this.skipWhitespace()
+        yield* this.readObject('')
+        this.skipWhitespace()
+        if (this.position !== this.source.length) throw new DocumentValidationError('Invalid JSON document')
+    }
+
+    private *readObject(path: string): Generator<{ key: string, value: string, type: JsonValueType, start: number, end: number }> {
         this.expect('{')
         this.skipWhitespace()
-        if (this.peek() === '}') return
+        if (this.peek() === '}') { this.position += 1; return }
         while (true) {
-            const key = this.readString()
+            const key = joinJsonPath(path, this.readString())
             this.skipWhitespace()
             this.expect(':')
             this.skipWhitespace()
-            const start = this.position
-            const { value, type } = this.readValue()
-            const end = this.position
-            yield { key, value, type, start, end }
+            yield* this.readValue(key)
             this.skipWhitespace()
-            if (this.peek() === '}') return
+            if (this.peek() === '}') { this.position += 1; return }
             this.expect(',')
             this.skipWhitespace()
         }
     }
 
-    private readValue(): { value: string, type: JsonScalarType | 'object' | 'array' } {
-        if (this.peek() === '"') return { value: this.readString(), type: 'string' }
-        if (this.source.startsWith('true', this.position)) { this.position += 4; return { value: 'true', type: 'boolean' } }
-        if (this.source.startsWith('false', this.position)) { this.position += 5; return { value: 'false', type: 'boolean' } }
-        if (this.source.startsWith('null', this.position)) { this.position += 4; return { value: 'null', type: 'null' } }
-        if (this.peek() === '{' || this.peek() === '[') {
-            const type = this.peek() === '{' ? 'object' : 'array'
-            return { value: this.readCompound(), type }
+    private *readArray(path: string): Generator<{ key: string, value: string, type: JsonValueType, start: number, end: number }> {
+        this.expect('[')
+        this.skipWhitespace()
+        let index = 0
+        if (this.peek() === ']') { this.position += 1; return }
+        while (true) {
+            yield* this.readValue(joinJsonPath(path, String(index)))
+            index += 1
+            this.skipWhitespace()
+            if (this.peek() === ']') { this.position += 1; return }
+            this.expect(',')
+            this.skipWhitespace()
         }
+    }
+
+    private *readValue(key: string): Generator<{ key: string, value: string, type: JsonValueType, start: number, end: number }> {
+        const start = this.position
+        if (this.peek() === '{') {
+            yield { key, value: '', type: 'object', start, end: start }
+            yield* this.readObject(key)
+            return
+        }
+        if (this.peek() === '[') {
+            yield { key, value: '', type: 'array', start, end: start }
+            yield* this.readArray(key)
+            return
+        }
+        if (this.peek() === '"') {
+            const value = this.readString()
+            yield { key, value, type: 'string', start, end: this.position }
+            return
+        }
+        if (this.source.startsWith('true', this.position)) { this.position += 4; yield { key, value: 'true', type: 'boolean', start, end: this.position }; return }
+        if (this.source.startsWith('false', this.position)) { this.position += 5; yield { key, value: 'false', type: 'boolean', start, end: this.position }; return }
+        if (this.source.startsWith('null', this.position)) { this.position += 4; yield { key, value: 'null', type: 'null', start, end: this.position }; return }
         const match = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/u.exec(this.source.slice(this.position))
         if (!match) throw new DocumentValidationError('Invalid JSON value')
         this.position += match[0].length
-        return { value: match[0], type: 'number' }
-    }
-
-    private readCompound(): string {
-        const start = this.position
-        const open = this.source[this.position]
-        const close = open === '{' ? '}' : ']'
-        let depth = 0
-        do {
-            const character = this.source[this.position]
-            if (character === '"') this.readString()
-            else {
-                this.position += 1
-                if (character === open) depth += 1
-                if (character === close) depth -= 1
-            }
-        } while (depth > 0 && this.position < this.source.length)
-        return this.source.slice(start, this.position)
+        yield { key, value: match[0], type: 'number', start, end: this.position }
     }
 
     private readString(): string {
@@ -429,5 +452,9 @@ class JsonObjectScanner {
         if (this.peek() !== character) throw new DocumentValidationError('Invalid JSON document')
         this.position += 1
     }
+}
+
+function joinJsonPath(path: string, key: string): string {
+    return `${path}/${key.replace(/~/gu, '~0').replace(/\//gu, '~1')}`
 }
 import { validateAgeRecipient, validateSigningPublicKey } from './crypto.js'
