@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -64,8 +64,9 @@ describe('gcrypt package', () => {
         expect(packageJson.scripts['dev:setup']).toBe('gcrypt setup')
         expect(standardOutput).toContain('private access key (never share)')
         expect(standardOutput).toContain('private signing key (never share)')
-        expect(standardOutput).toMatch(/Share this member setup code with a maintainer:\ngcrypt-member-v1\.[A-Za-z0-9_-]+/u)
+        expect(standardOutput).not.toContain('Share this member setup code with a maintainer')
         expect(standardOutput).toContain('Run npm run secrets to add values.')
+        await expect(access(join(project, '.env.example'))).rejects.toMatchObject({ code: 'ENOENT' })
         expect(parseEncryptedDocument(await readFile(join(project, '.env.dev.enc'), 'utf8'), 'dotenv').metadata.members).toMatchObject([
             { id: 'test-maintainer', recipient: expect.stringMatching(/^age1/u), signingKey: expect.stringMatching(/^ed25519:/u), isMaintainer: true },
         ])
@@ -93,6 +94,7 @@ describe('gcrypt package', () => {
         })
 
         expect(status, standardError).toBe(0)
+        expect(standardOutput).not.toContain('Share this member setup code with a maintainer')
         const document = parseEncryptedDocument(await readFile(join(project, 'settings.json.enc'), 'utf8'), 'json')
         expect(document.metadata.version).toBe(3)
         expect(document.values).toEqual([])

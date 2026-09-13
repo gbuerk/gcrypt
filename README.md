@@ -23,7 +23,6 @@ npx gcrypt init
 
 `init` creates `.env.dev.enc`, adds helper scripts to `package.json`, and
 wraps the existing `dev` script. It asks before replacing any existing scripts.
-It also creates an empty `.env.example` when one does not exist.
 
 The private keys are stored locally at:
 

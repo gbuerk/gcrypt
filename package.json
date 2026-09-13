@@ -1,6 +1,6 @@
 {
   "name": "@gbuerk/gcrypt",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Git-friendly encrypted dotenv and JSON configuration",
   "type": "module",
   "keywords": [

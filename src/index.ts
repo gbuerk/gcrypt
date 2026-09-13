@@ -106,11 +106,11 @@ function reportPrivateKey(result: { created: boolean, path: string }, identity: 
     stdout.write(`${result.created ? 'Created' : 'Using'} private ${identity} (never share) at ${result.path}\n`)
 }
 
-async function runSetup(): Promise<Awaited<ReturnType<typeof setup>>> {
+async function runSetup(showMemberSetupCode = true): Promise<Awaited<ReturnType<typeof setup>>> {
     const result = await setup()
     reportPrivateKey(result.age, 'access key')
     reportPrivateKey(result.signing, 'signing key')
-    stdout.write(`Share this member setup code with a maintainer:\n${result.memberSetupCode}\n`)
+    if (showMemberSetupCode) stdout.write(`Share this member setup code with a maintainer:\n${result.memberSetupCode}\n`)
     return result
 }
 
@@ -155,10 +155,8 @@ async function initializeProject(file: string | undefined, getPrompt: () => Prom
     if (!packageJson.dependencies?.['@gbuerk/gcrypt'] && !packageJson.devDependencies?.['@gbuerk/gcrypt']) {
         await installGcrypt(localPackageSource())
     }
-    const identities = await runSetup()
+    const identities = await runSetup(false)
     const memberId = await initialMemberId(getPrompt())
-    const examplePath = '.env.example'
-    try { await access(examplePath) } catch { await writeFile(examplePath, '') }
     await createEncryptedDocument(target, emptyDocument(target), {
         members: [{ id: memberId, recipient: identities.age.recipient, signingKey: identities.signing.publicKey, isMaintainer: true }],
     })
@@ -239,7 +237,7 @@ export function createProgram(providedPrompt?: Prompt): Command {
     secrets.command('init [file]').action(async (file) => {
         const target = file ?? '.env.dev.enc'
         try { await access(target); throw new Error(`Refusing to overwrite existing encrypted file: ${target}`) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-        const identities = await runSetup()
+        const identities = await runSetup(false)
         await createEncryptedDocument(target, emptyDocument(target), {
             members: [{ id: await initialMemberId(getPrompt()), recipient: identities.age.recipient, signingKey: identities.signing.publicKey, isMaintainer: true }],
         })
