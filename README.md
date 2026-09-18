@@ -67,7 +67,8 @@ npm run secrets -- .env.dev.enc
 ```
 
 `gcrypt` verifies maintainer approval before it writes a temporary plaintext
-file. It re-encrypts all values and signs the updated document after editing.
+file. An unchanged edit does not rewrite the encrypted file; otherwise it
+re-encrypts only added or changed values and signs the updated document.
 
 ### 4. Run the application
 

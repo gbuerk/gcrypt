@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -58,6 +58,13 @@ async function signedDotenv(recipient: string, maintainer: { privateKey: string,
 async function localMaintainer(homeDirectory: string): Promise<{ privateKey: string, publicKey: string }> {
     const result = await maintainerSetup({ homeDirectory, prompt: { confirm: async () => true } })
     return { privateKey: await readDefaultSigningIdentity(homeDirectory), publicKey: result.publicKey! }
+}
+
+async function editorScript(directory: string, replacement: string, with_: string): Promise<string> {
+    const file = join(directory, 'editor.mjs')
+    await writeFile(file, `#!/usr/bin/env node\nimport { readFileSync, writeFileSync } from 'node:fs'\nconst path = process.argv[2]\nwriteFileSync(path, readFileSync(path, 'utf8').replace(${JSON.stringify(replacement)}, ${JSON.stringify(with_)}))\n`)
+    await chmod(file, 0o700)
+    return file
 }
 
 function replaceDocumentAfterFirstRead(file: string, replacement: string): () => void {
@@ -183,11 +190,13 @@ describe('maintainer commands', () => {
         const promoted = parseEncryptedDocument(await readFile(file, 'utf8'), 'json')
         expect(promoted.metadata.members).toContainEqual({ id: 'additional', recipient: additionalRecipient.recipient, signingKey: additional.publicKey, isMaintainer: true })
         expect(promoted.metadata.maintainers).toEqual([signing.publicKey, additional.publicKey])
+        expect(promoted.values.map(({ marker }) => marker)).toEqual([marker])
         await expect(verifyEncryptedDocument(file)).resolves.toBeUndefined()
         await revokeMaintainer(file, { homeDirectory: home, prompt: { memberId: async () => 'additional' } })
         const revoked = parseEncryptedDocument(await readFile(file, 'utf8'), 'json')
         expect(revoked.metadata.members).toContainEqual({ id: 'additional', recipient: additionalRecipient.recipient, signingKey: additional.publicKey, isMaintainer: false })
         expect(revoked.metadata.maintainers).toEqual([signing.publicKey])
+        expect(revoked.values.map(({ marker }) => marker)).toEqual([marker])
         await expect(decryptValue(revoked.values[0].marker, additionalRecipient.identity)).resolves.toBe('secret')
         await expect(verifyEncryptedDocument(file)).resolves.toBeUndefined()
         await expect(revokeMaintainer(file, { homeDirectory: home, prompt: { memberId: async () => 'owner' } })).rejects.toThrow('final maintainer')
@@ -308,12 +317,57 @@ describe('encrypted document lifecycle', () => {
         const restore = replaceDocumentAfterFirstRead(file, original.replace(document.values[0].marker, replacement))
 
         try {
-            await expect(editEncryptedDocument(file, '/usr/bin/true', home)).resolves.toBeUndefined()
+            await expect(editEncryptedDocument(file, await editorScript(home, 'TOKEN=secret', 'TOKEN=updated'), home)).resolves.toBeUndefined()
         } finally {
             restore()
         }
 
-        await expect(decryptEncryptedDocument(file, home)).resolves.toBe('TOKEN=secret\n')
+        await expect(decryptEncryptedDocument(file, home)).resolves.toBe('TOKEN=updated\n')
+    })
+
+    it('does not rewrite an unchanged document after editing', async () => {
+        const home = await temporaryDirectory()
+        await setup({ homeDirectory: home })
+        await maintainerSetup({ homeDirectory: home })
+        const file = join(home, '.env.dev.enc')
+        await createEncryptedDocument(file, 'TOKEN=secret\nPORT=3000\n', { homeDirectory: home })
+        const original = await readFile(file, 'utf8')
+
+        await editEncryptedDocument(file, '/usr/bin/true', home)
+
+        await expect(readFile(file, 'utf8')).resolves.toBe(original)
+    })
+
+    it('only replaces ciphertext for changed dotenv values', async () => {
+        const home = await temporaryDirectory()
+        await setup({ homeDirectory: home })
+        await maintainerSetup({ homeDirectory: home })
+        const file = join(home, '.env.dev.enc')
+        await createEncryptedDocument(file, 'TOKEN=secret\nPORT=3000\n', { homeDirectory: home })
+        const before = parseEncryptedDocument(await readFile(file, 'utf8'), 'dotenv')
+
+        await editEncryptedDocument(file, await editorScript(home, 'TOKEN=secret', 'TOKEN=changed'), home)
+
+        const after = parseEncryptedDocument(await readFile(file, 'utf8'), 'dotenv')
+        expect(after.values[0].marker).not.toBe(before.values[0].marker)
+        expect(after.values[1].marker).toBe(before.values[1].marker)
+        await expect(decryptEncryptedDocument(file, home)).resolves.toBe('TOKEN=changed\nPORT=3000\n')
+    })
+
+    it('only replaces ciphertext for changed JSON leaf values', async () => {
+        const home = await temporaryDirectory()
+        await setup({ homeDirectory: home })
+        await maintainerSetup({ homeDirectory: home })
+        const file = join(home, 'secrets.json.enc')
+        await createEncryptedDocument(file, '{"primary":"one","secondary":"two"}', { homeDirectory: home })
+        const before = parseEncryptedDocument(await readFile(file, 'utf8'), 'json')
+
+        await editEncryptedDocument(file, await editorScript(home, '"primary": "one"', '"primary": "updated"'), home)
+
+        const after = parseEncryptedDocument(await readFile(file, 'utf8'), 'json')
+        expect(after.values[0].marker).not.toBe(before.values[0].marker)
+        expect(after.values[1].marker).toBe(before.values[1].marker)
+        await expect(decryptEncryptedDocument(file, home)).resolves.toBe('{\n  "primary": "updated",\n  "secondary": "two"\n}\n')
     })
 
     it('refuses a document whose signed member identity was changed', async () => {

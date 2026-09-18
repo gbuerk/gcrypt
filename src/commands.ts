@@ -76,6 +76,11 @@ export interface InitialDocumentOptions {
     memberId?: string
 }
 
+interface ExistingValue {
+    plaintext: string
+    marker: string
+}
+
 async function ageSetup({ homeDirectory }: SetupOptions = {}): Promise<AgeSetupResult> {
     try {
         const identity = await readDefaultAgeIdentity(homeDirectory)
@@ -155,12 +160,7 @@ export async function createEncryptedDocument(filePath: string, plaintext: strin
     const members = options.members ?? [{ id: options.memberId ?? 'local', recipient: await ageRecipientForIdentity(identity), signingKey: publicKey, isMaintainer: true }]
     const metadata = metadataForMembers(members)
     const format = filePath.endsWith('.json.enc') || filePath.endsWith('.json') ? 'json' : 'dotenv'
-    const source = format === 'json'
-        ? await encryptJson(plaintext, metadata)
-        : await encryptDotenv(plaintext, metadata)
-    const document = parseEncryptedDocument(source, format)
-    const signature = signDocument(canonicalSigningData(document), privateKey)
-    await atomicWrite(filePath, renderMetadata(source, format, { ...document.metadata, signatures: [`${publicKey}:${signature}`] }))
+    await writeNewEncryptedDocument(filePath, plaintext, format, metadata, privateKey, publicKey)
 }
 
 export async function verifyEncryptedDocument(filePath: string): Promise<void> {
@@ -199,10 +199,17 @@ export async function editEncryptedDocument(filePath: string, editor: string, ho
         })
         if (result !== 0) throw new Error(`Editor exited with status ${result ?? 'unknown'}`)
         const updated = await readFile(temporaryFile, 'utf8')
-        await createEncryptedDocument(filePath, updated, {
-            homeDirectory,
-            members: authorized.document.metadata.members,
-        })
+        const existingValues = await decryptedValueMap(authorized.document, authorized.identity)
+        if (samePlaintextDocument(plaintext, updated, authorized.format)) return
+        await writeNewEncryptedDocument(
+            filePath,
+            updated,
+            authorized.format,
+            metadataForMembers(authorized.document.metadata.members),
+            authorized.privateKey,
+            authorized.publicKey,
+            existingValues,
+        )
     } finally {
         await rm(directory, { force: true, recursive: true })
     }
@@ -224,8 +231,9 @@ export async function executeDotenv(filePath: string, command: string[], homeDir
 async function changeMembers(filePath: string, options: CommandOptions, update: (members: DocumentMember[]) => DocumentMember[]): Promise<void> {
     const { source, document, format, identity, privateKey, publicKey } = await loadAuthorizedDocument(filePath, options.homeDirectory)
     const metadata = metadataForMembers(update(document.metadata.members), document.metadata.version)
-    const plaintextValues = await Promise.all(document.values.map(({ marker }) => decryptValue(marker, identity)))
-    const markers = await Promise.all(plaintextValues.map((value) => encryptValue(value, metadata.recipients)))
+    const markers = sameList(metadata.recipients, document.metadata.recipients)
+        ? document.values.map(({ marker }) => marker)
+        : await Promise.all([...((await decryptedValueMap(document, identity)).values())].map(({ plaintext }) => encryptValue(plaintext, metadata.recipients)))
     await writeSignedDocument(filePath, source, document, format, { ...metadata, signatures: document.metadata.signatures }, markers, privateKey, publicKey)
 }
 
@@ -273,26 +281,65 @@ function tamperedDocumentError(filePath: string): Error {
     return new Error(`${filePath} has been tampered with and is no longer valid`)
 }
 
-async function encryptDotenv(plaintext: string, metadata: DocumentMetadata): Promise<string> {
+async function writeNewEncryptedDocument(filePath: string, plaintext: string, format: DocumentFormat, metadata: DocumentMetadata, privateKey: string, publicKey: string, existingValues?: Map<string, ExistingValue>): Promise<void> {
+    const source = format === 'json'
+        ? await encryptJson(plaintext, metadata, existingValues)
+        : await encryptDotenv(plaintext, metadata, existingValues)
+    const document = parseEncryptedDocument(source, format)
+    const signature = signDocument(canonicalSigningData(document), privateKey)
+    await atomicWrite(filePath, renderMetadata(source, format, { ...document.metadata, signatures: [`${publicKey}:${signature}`] }))
+}
+
+async function encryptDotenv(plaintext: string, metadata: DocumentMetadata, existingValues?: Map<string, ExistingValue>): Promise<string> {
     const values = parseDotenv(plaintext)
-    const lines = await Promise.all(Object.entries(values).map(async ([key, value]) => `${key}=${await encryptValue(value, metadata.recipients)}`))
+    const lines = await Promise.all(Object.entries(values).map(async ([key, value]) => `${key}=${await markerForValue(key, value, metadata, existingValues)}`))
     return `# WARNING: ${managedFileWarning}\n# gcrypt: 2\n# gcrypt-recipients: ${metadata.recipients.join(',')}\n# gcrypt-maintainers: ${metadata.maintainers.join(',')}\n${metadata.members.map(renderDotenvMember).join('\n')}\n# gcrypt-signature: pending\n\n${lines.join('\n')}\n`
 }
 
-async function encryptJson(plaintext: string, metadata: DocumentMetadata): Promise<string> {
-    let values: unknown
-    try { values = JSON.parse(plaintext) } catch { throw new Error('Invalid JSON document') }
-    if (typeof values !== 'object' || values === null || Array.isArray(values) || Object.hasOwn(values, '$gcrypt')) throw new Error('JSON document must be a top-level object without $gcrypt')
+async function encryptJson(plaintext: string, metadata: DocumentMetadata, existingValues?: Map<string, ExistingValue>): Promise<string> {
+    const values = parseJsonPlaintext(plaintext)
     const jsonMetadata = { ...metadata, version: 3 as const }
     const encrypted: Record<string, unknown> = { $gcrypt: { warning: managedFileWarning, ...jsonMetadata, signatures: ['pending'] } }
-    for (const [key, value] of Object.entries(values)) encrypted[key] = await encryptJsonValue(value, jsonMetadata)
+    for (const [key, value] of Object.entries(values)) encrypted[key] = await encryptJsonValue(value, jsonMetadata, existingValues, `/${escapeJsonPathSegment(key)}`)
     return `${JSON.stringify(encrypted, undefined, 2)}\n`
 }
 
-async function encryptJsonValue(value: unknown, metadata: DocumentMetadata): Promise<unknown> {
-    if (Array.isArray(value)) return Promise.all(value.map((entry) => encryptJsonValue(entry, metadata)))
-    if (value !== null && typeof value === 'object') return Object.fromEntries(await Promise.all(Object.entries(value).map(async ([key, entry]) => [key, await encryptJsonValue(entry, metadata)])))
-    return encryptValue(JSON.stringify(value), metadata.recipients)
+async function encryptJsonValue(value: unknown, metadata: DocumentMetadata, existingValues: Map<string, ExistingValue> | undefined, path: string): Promise<unknown> {
+    if (Array.isArray(value)) return Promise.all(value.map((entry, index) => encryptJsonValue(entry, metadata, existingValues, `${path}/${index}`)))
+    if (value !== null && typeof value === 'object') return Object.fromEntries(await Promise.all(Object.entries(value).map(async ([key, entry]) => [key, await encryptJsonValue(entry, metadata, existingValues, `${path}/${escapeJsonPathSegment(key)}`)])))
+    return markerForValue(path, JSON.stringify(value), metadata, existingValues)
+}
+
+async function markerForValue(key: string, plaintext: string, metadata: DocumentMetadata, existingValues?: Map<string, ExistingValue>): Promise<string> {
+    const existing = existingValues?.get(key)
+    return existing?.plaintext === plaintext ? existing.marker : encryptValue(plaintext, metadata.recipients)
+}
+
+async function decryptedValueMap(document: ParsedDocument, identity: string): Promise<Map<string, ExistingValue>> {
+    const values = await Promise.all(document.values.map(async ({ key, marker }) => ({ key, marker, plaintext: await decryptValue(marker, identity) })))
+    return new Map(values.map(({ key, marker, plaintext }) => [key, { marker, plaintext }]))
+}
+
+function samePlaintextDocument(original: string, updated: string, format: DocumentFormat): boolean {
+    if (format === 'json') return JSON.stringify(parseJsonPlaintext(original)) === JSON.stringify(parseJsonPlaintext(updated))
+    const originalValues = parseDotenv(original)
+    const updatedValues = parseDotenv(updated)
+    const originalEntries = Object.entries(originalValues)
+    const updatedEntries = Object.entries(updatedValues)
+    return originalEntries.length === updatedEntries.length && originalEntries.every(([key, value]) => updatedValues[key] === value)
+}
+
+function parseJsonPlaintext(plaintext: string): Record<string, unknown> {
+    let values: unknown
+    try { values = JSON.parse(plaintext) } catch { throw new Error('Invalid JSON document') }
+    if (typeof values !== 'object' || values === null || Array.isArray(values) || Object.hasOwn(values, '$gcrypt')) {
+        throw new Error('JSON document must be a top-level object without $gcrypt')
+    }
+    return values as Record<string, unknown>
+}
+
+function escapeJsonPathSegment(segment: string): string {
+    return segment.replace(/~/gu, '~0').replace(/\//gu, '~1')
 }
 
 function parseJsonScalar(value: string): string | number | boolean | null {
@@ -397,6 +444,10 @@ function metadataForMembers(members: DocumentMember[], version: DocumentMetadata
         maintainers: members.flatMap(({ signingKey, isMaintainer }) => isMaintainer ? [signingKey] : []),
         signatures: [],
     }
+}
+
+function sameList(left: readonly string[], right: readonly string[]): boolean {
+    return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
 function renderDotenvMember({ id, recipient, signingKey, isMaintainer }: DocumentMember): string {
